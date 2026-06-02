@@ -2,15 +2,17 @@
 
 Overlay discret pe taskbar pentru întrebări de programare (NVIDIA API).
 
-## Run and play (PC nou) — comenzi PowerShell
+## PC nou (de la zero) — o singură comandă
 
-Copiază tot conținutul din **`Linie`** în PowerShell (verifică Python, clone, venv, run).
-
-Sau o singură comandă după clone:
+Deschide **PowerShell** și lipește:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install_and_run.ps1
+irm https://raw.githubusercontent.com/crisanalex15/UPT.Script/main/fresh_pc.ps1 | iex
 ```
+
+Scriptul instalează automat (dacă lipsesc) **Git** și **Python**, clonează repo-ul, creează `.venv`, instalează dependențele și pornește aplicația.
+
+Dacă după prima rulare cere repornire terminal: închide PowerShell, deschide din nou, rulează aceeași comandă.
 
 ## Hotkeys (implicit)
 
@@ -21,15 +23,6 @@ powershell -ExecutionPolicy Bypass -File install_and_run.ps1
 
 Setările sunt în `application_settings.json`.
 
-## Fără fișier cheie
-
-Poți porni cu cheia direct în comandă:
-
-```bat
-start.bat "nvapi-..."
-```
-
 ## Notă
 
-- `api_key.local` nu se urcă pe Git (este în `.gitignore`).
 - Pe Windows, hotkey global poate necesita terminal **Run as administrator**.
