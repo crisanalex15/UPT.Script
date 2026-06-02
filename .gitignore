@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 
 .quiz_solver_window_pos.json
+api_key.local
