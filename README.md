@@ -4,24 +4,13 @@ Overlay discret pe taskbar pentru întrebări de programare (NVIDIA API).
 
 ## Run and play (PC nou) — comenzi PowerShell
 
-**O singură dată pe PC** (dacă `python` nu e găsit):
+Copiază tot conținutul din **`Linie`** în PowerShell (verifică Python, clone, venv, run).
+
+Sau o singură comandă după clone:
 
 ```powershell
-winget install -e --id Python.Python.3.12
+powershell -ExecutionPolicy Bypass -File install_and_run.ps1
 ```
-
-Închide și redeschide PowerShell, apoi:
-
-```powershell
-git clone https://github.com/crisanalex15/UPT.Script.git
-cd "UPT.Script"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python .\quiz_solver.py "nvapi-CHEIA_TA"
-```
-
-Dacă `UPT.Script` există deja: `cd UPT.Script` + `git pull`, apoi aceleași comenzi de venv/pip/run.
 
 ## Hotkeys (implicit)
 
