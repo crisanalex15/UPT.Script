@@ -1,28 +1,23 @@
 # UPT.Script (Quiz Solver)
 
-Overlay discret pe taskbar pentru întrebări de programare (NVIDIA API).
-
-## PC nou (de la zero) — o singură comandă
-
-Deschide **PowerShell** și lipește:
+## Pornire (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/crisanalex15/UPT.Script/main/fresh_pc.ps1 | iex
+git clone https://github.com/crisanalex15/UPT.Script.git
+cd "UPT.Script"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python .\quiz_solver.py "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"
 ```
 
-Scriptul instalează automat (dacă lipsesc) **Git** și **Python**, clonează repo-ul, creează `.venv`, instalează dependențele și pornește aplicația.
+**PC nou fără Python:** instalează mai întâi `winget install -e --id Python.Python.3.12`, repornește PowerShell, apoi rulează comenzile de mai sus.
 
-Dacă după prima rulare cere repornire terminal: închide PowerShell, deschide din nou, rulează aceeași comandă.
-
-## Hotkeys (implicit)
+## Hotkeys
 
 | Combinație | Acțiune |
 |------------|---------|
-| `Ctrl+Shift+A` | Setare cheie API (sesiune) |
-| `Ctrl+Shift+S` | Trimite întrebarea din clipboard |
+| `Ctrl+Shift+A` | Setare cheie API |
+| `Ctrl+Shift+S` | Request (clipboard) |
 
-Setările sunt în `application_settings.json`.
-
-## Notă
-
-- Pe Windows, hotkey global poate necesita terminal **Run as administrator**.
+Setări: `application_settings.json`
