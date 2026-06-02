@@ -1,6 +1,18 @@
+REM === Prima data pe PC nou (doar daca "python" nu merge) ===
+REM winget install -e --id Python.Python.3.12
+REM Inchide PowerShell, deschide din nou, apoi:
+
 git clone https://github.com/crisanalex15/UPT.Script.git
-cd UPT.Script
-setup.bat
-copy api_key.local.example api_key.local
-notepad api_key.local
-start.bat
+cd "UPT.Script"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python .\quiz_solver.py "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"
+
+REM === Daca folderul exista deja ===
+REM cd "UPT.Script"
+REM git pull
+REM python -m venv .venv
+REM .\.venv\Scripts\Activate.ps1
+REM pip install -r requirements.txt
+REM python .\quiz_solver.py "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"
