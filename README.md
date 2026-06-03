@@ -2,16 +2,12 @@
 
 ## Pornire (PowerShell)
 
-```powershell
-git clone https://github.com/crisanalex15/UPT.Script.git
-cd "UPT.Script"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python .\quiz_solver.py "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"
-```
+## Utilizare
 
-**PC nou fără Python:** instalează mai întâi `winget install -e --id Python.Python.3.12`, repornește PowerShell, apoi rulează comenzile de mai sus.
+1. Copiază întrebarea (opțional) sau lasă direct
+2. **Ctrl+Shift+S** → tragi un dreptunghi pe ecran (doar chenar albastru punctat, fără fundal negru)
+3. **Esc** sau click dreapta = anulare
+4. Răspunsul apare în overlay transparent; **Copy** pentru text
 
 ## Hotkeys
 

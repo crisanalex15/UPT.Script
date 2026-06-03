@@ -13,7 +13,7 @@ Utilizare:
     1. Rulează: python quiz_solver.py
        sau:    python quiz_solver.py "<NVIDIA_API_KEY>"
     2. Selectează întrebarea (grilă SAU răspuns deschis), copiază (Ctrl+C)
-    3. Apasă hotkey-ul configurat (implicit Ctrl+Shift+S; vezi application_settings.json)
+    3. Apasă hotkey-ul configurat (implicit Ctrl+Shift+S) → tragi chenar punctat pe ecran
     4. Pe taskbar apare un indiciu scurt; click Copy pentru textul complet de lipit
     5. Click dreapta pe widget → Exit
 
@@ -190,6 +190,137 @@ STRIP_MAX_WIDTH = 280
 TASKBAR_ICONS_FRACTION = 0.32
 TASKBAR_TRAY_FRACTION = 0.22
 TASKBAR_HEIGHT_PX = 48
+
+# Selector zonă ecran — doar chenar punctat, fără overlay întunecat
+CAPTURE_BORDER_COLOR = "#00A8FF"
+CAPTURE_MIN_SIZE_PX = 10
+
+
+class RegionSelectOverlay:
+    """Fullscreen transparent; la drag apare doar un dreptunghi cu linii punctate."""
+
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_complete: Callable[[bytes | None], None],
+    ) -> None:
+        self.root = root
+        self.on_complete = on_complete
+        self._start_x = 0
+        self._start_y = 0
+        self._rect_id: int | None = None
+        self._closed = False
+
+        self.top = tk.Toplevel(root)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        self.top.geometry(f"{sw}x{sh}+0+0")
+
+        bg = TRANSPARENT_KEY
+        if sys.platform.startswith("win"):
+            try:
+                self.top.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
+            except tk.TclError:
+                bg = TASKBAR_BG
+        else:
+            self.top.attributes("-alpha", 0.01)
+            bg = "gray"
+
+        self.top.configure(bg=bg)
+        self.canvas = tk.Canvas(
+            self.top,
+            bg=bg,
+            highlightthickness=0,
+            cursor="crosshair",
+        )
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.top.bind("<Escape>", self._on_cancel)
+        self.top.bind("<Button-3>", self._on_cancel)
+        self.top.focus_force()
+        try:
+            self.top.grab_set()
+        except tk.TclError:
+            pass
+
+    def _canvas_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
+        return x_root - self.top.winfo_rootx(), y_root - self.top.winfo_rooty()
+
+    def _on_press(self, event: tk.Event) -> None:
+        self._start_x = event.x_root
+        self._start_y = event.y_root
+        if self._rect_id is not None:
+            self.canvas.delete(self._rect_id)
+        cx, cy = self._canvas_xy(event.x_root, event.y_root)
+        self._rect_id = self.canvas.create_rectangle(
+            cx,
+            cy,
+            cx,
+            cy,
+            outline=CAPTURE_BORDER_COLOR,
+            width=2,
+            dash=(6, 4),
+        )
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if self._rect_id is None:
+            return
+        x0, y0 = self._canvas_xy(
+            min(self._start_x, event.x_root),
+            min(self._start_y, event.y_root),
+        )
+        x1, y1 = self._canvas_xy(
+            max(self._start_x, event.x_root),
+            max(self._start_y, event.y_root),
+        )
+        self.canvas.coords(self._rect_id, x0, y0, x1, y1)
+
+    def _on_release(self, event: tk.Event) -> None:
+        x1 = min(self._start_x, event.x_root)
+        y1 = min(self._start_y, event.y_root)
+        x2 = max(self._start_x, event.x_root)
+        y2 = max(self._start_y, event.y_root)
+        if x2 - x1 < CAPTURE_MIN_SIZE_PX or y2 - y1 < CAPTURE_MIN_SIZE_PX:
+            self._close()
+            self.on_complete(None)
+            return
+        bbox = (x1, y1, x2, y2)
+        self._close()
+        self.root.after(80, lambda: self._grab_bbox(bbox))
+
+    def _grab_bbox(self, bbox: tuple[int, int, int, int]) -> None:
+        try:
+            from PIL import ImageGrab
+
+            img = ImageGrab.grab(bbox=bbox)
+            jpeg = _compress_clipboard_image(img)
+            self.on_complete(jpeg)
+        except Exception as exc:
+            print(f"[Capture] Eroare: {exc}")
+            self.on_complete(None)
+
+    def _on_cancel(self, _event: tk.Event | None = None) -> None:
+        self._close()
+        self.on_complete(None)
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.top.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
 
 
 def _api_key_looks_valid(key: str) -> bool:
@@ -455,6 +586,7 @@ class QuizSolverApp:
         self._manual_position: tuple[int, int] | None = self._load_saved_position()
         self._session_api_key: str = initial_api_key.strip()
         self._api_prompt_open = False
+        self._region_select_active = False
 
         self._setup_ui()
         self._setup_context_menu()
@@ -650,7 +782,7 @@ class QuizSolverApp:
             self._api_prompt_open = False
 
     def _handle_hotkey(self) -> None:
-        if self._busy:
+        if self._busy or self._region_select_active:
             return
 
         api_key = self._effective_api_key()
@@ -661,11 +793,6 @@ class QuizSolverApp:
             self._show_message("Cheie API invalidă", show_copy=False)
             return
 
-        clipboard_text, image_jpeg = _read_clipboard_payload()
-        if not clipboard_text and not image_jpeg:
-            self._show_message("Nimic copiat", show_copy=False)
-            return
-
         if self._last_api_call > 0:
             elapsed = time.monotonic() - self._last_api_call
             if elapsed < API_MIN_INTERVAL_SEC:
@@ -673,17 +800,29 @@ class QuizSolverApp:
                 self._show_message(f"Așteaptă {wait_sec}s", show_copy=False)
                 return
 
-        self._last_clipboard = clipboard_text
-        self._busy = True
-        loading = "…+📷" if image_jpeg else "..."
-        self._show_message(loading, show_copy=False)
+        self._start_region_select(api_key)
 
-        thread = threading.Thread(
-            target=self._query_nvidia,
-            args=(clipboard_text, image_jpeg, api_key),
-            daemon=True,
-        )
-        thread.start()
+    def _start_region_select(self, api_key: str) -> None:
+        """Deschide selector transparent (chenar punctat), apoi trimite zona la API."""
+        self._region_select_active = True
+        self.root.withdraw()
+
+        def on_capture(image_jpeg: bytes | None) -> None:
+            self._region_select_active = False
+            if not image_jpeg:
+                print("[Capture] Anulat sau zonă prea mică.")
+                return
+            self._last_clipboard = ""
+            self._busy = True
+            self._show_message("…+📷", show_copy=False)
+            thread = threading.Thread(
+                target=self._query_nvidia,
+                args=("", image_jpeg, api_key),
+                daemon=True,
+            )
+            thread.start()
+
+        RegionSelectOverlay(self.root, on_capture)
 
     def _query_nvidia(
         self,
