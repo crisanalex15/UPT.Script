@@ -13,7 +13,7 @@ Utilizare:
     1. Rulează: python quiz_solver.py
        sau:    python quiz_solver.py "<NVIDIA_API_KEY>"
     2. Selectează întrebarea (grilă SAU răspuns deschis), copiază (Ctrl+C)
-    3. Apasă hotkey-ul configurat (implicit Ctrl+Shift+S) → tragi chenar punctat pe ecran
+    3. Ctrl+Shift+S = request din clipboard | Ctrl+Alt+D = captură zonă (chenar punctat)
     4. Pe taskbar apare un indiciu scurt; click Copy pentru textul complet de lipit
     5. Click dreapta pe widget → Exit
 
@@ -58,6 +58,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "nvidia_model_fast": "meta/llama-3.3-70b-instruct",
     "nvidia_model_vlm": "mistralai/mistral-large-3-675b-instruct-2512",
     "hotkey_request": "ctrl+shift+s",
+    "hotkey_capture": "ctrl+alt+d",
     "hotkey_set_api_key": "ctrl+shift+a",
     "api_min_interval_sec": 2.0,
     "api_max_retries": 2,
@@ -122,6 +123,7 @@ API_MAX_OUTPUT_LONG: int = max(300, _setting_int("api_max_output_long"))
 IMAGE_MAX_DIMENSION_PX: int = max(64, _setting_int("image_max_dimension_px"))
 IMAGE_JPEG_QUALITY: int = max(30, min(95, _setting_int("image_jpeg_quality")))
 HOTKEY: str = _setting_str("hotkey_request").lower() or "ctrl+shift+s"
+HOTKEY_CAPTURE: str = _setting_str("hotkey_capture").lower() or "ctrl+alt+d"
 HOTKEY_SET_API_KEY: str = _setting_str("hotkey_set_api_key").lower() or "ctrl+shift+a"
 API_MIN_INTERVAL_SEC: float = max(2.0, _setting_float("api_min_interval_sec"))
 
@@ -737,9 +739,18 @@ class QuizSolverApp:
             raise RuntimeError(
                 f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_SET_API_KEY}' pentru API key."
             ) from exc
+        try:
+            keyboard.add_hotkey(HOTKEY_CAPTURE, self._on_capture_hotkey_pressed, suppress=False)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_CAPTURE}' pentru captură zonă."
+            ) from exc
 
     def _on_hotkey_pressed(self) -> None:
         self.root.after(0, self._handle_hotkey)
+
+    def _on_capture_hotkey_pressed(self) -> None:
+        self.root.after(0, self._handle_capture_hotkey)
 
     def _on_api_hotkey_pressed(self) -> None:
         self.root.after(0, self._prompt_api_key_if_needed)
@@ -782,6 +793,42 @@ class QuizSolverApp:
             self._api_prompt_open = False
 
     def _handle_hotkey(self) -> None:
+        if self._busy or self._region_select_active:
+            return
+
+        api_key = self._effective_api_key()
+        if not api_key:
+            self._show_message(f"Setează cheia ({HOTKEY_SET_API_KEY.upper()})", show_copy=False)
+            return
+        if not _api_key_looks_valid(api_key):
+            self._show_message("Cheie API invalidă", show_copy=False)
+            return
+
+        clipboard_text, image_jpeg = _read_clipboard_payload()
+        if not clipboard_text and not image_jpeg:
+            self._show_message("Nimic copiat", show_copy=False)
+            return
+
+        if self._last_api_call > 0:
+            elapsed = time.monotonic() - self._last_api_call
+            if elapsed < API_MIN_INTERVAL_SEC:
+                wait_sec = max(1, math.ceil(API_MIN_INTERVAL_SEC - elapsed))
+                self._show_message(f"Așteaptă {wait_sec}s", show_copy=False)
+                return
+
+        self._last_clipboard = clipboard_text
+        self._busy = True
+        loading = "…+📷" if image_jpeg else "..."
+        self._show_message(loading, show_copy=False)
+
+        thread = threading.Thread(
+            target=self._query_nvidia,
+            args=(clipboard_text, image_jpeg, api_key),
+            daemon=True,
+        )
+        thread.start()
+
+    def _handle_capture_hotkey(self) -> None:
         if self._busy or self._region_select_active:
             return
 
@@ -1300,7 +1347,8 @@ def main() -> None:
     else:
         print("Cheie API NVIDIA (nvapi-) — OK.")
         print(
-            f"Quiz Solver activ. Copiază text/imagine → {HOTKEY.upper()}. "
+            f"Quiz Solver activ. Clipboard → {HOTKEY.upper()}. "
+            f"Captură zonă → {HOTKEY_CAPTURE.upper()}. "
             f"Setează cheie sesiune: {HOTKEY_SET_API_KEY.upper()}. "
             f"Pauză min. {API_MIN_INTERVAL_SEC:.0f}s. "
             f"Text rapid: {NVIDIA_MODEL_FAST} | Imagine: {NVIDIA_MODEL_VLM}. "

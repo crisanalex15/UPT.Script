@@ -4,6 +4,7 @@
   "nvidia_model_fast": "meta/llama-3.3-70b-instruct",
   "nvidia_model_vlm": "mistralai/mistral-large-3-675b-instruct-2512",
   "hotkey_request": "ctrl+shift+s",
+  "hotkey_capture": "ctrl+alt+d",
   "hotkey_set_api_key": "ctrl+shift+a",
   "api_min_interval_sec": 2.0,
   "api_max_retries": 2,
