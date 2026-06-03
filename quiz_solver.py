@@ -193,13 +193,15 @@ TASKBAR_ICONS_FRACTION = 0.32
 TASKBAR_TRAY_FRACTION = 0.22
 TASKBAR_HEIGHT_PX = 48
 
-# Selector zonă ecran — doar chenar punctat, fără overlay întunecat
+# Selector zonă ecran — chenar punctat; alpha mic (NU transparentcolor: click-urile trec prin)
 CAPTURE_BORDER_COLOR = "#00A8FF"
+CAPTURE_HINT_COLOR = "#FFFFFF"
 CAPTURE_MIN_SIZE_PX = 10
+CAPTURE_OVERLAY_ALPHA = 0.08
 
 
 class RegionSelectOverlay:
-    """Fullscreen transparent; la drag apare doar un dreptunghi cu linii punctate."""
+    """Fullscreen aproape invizibil; la drag apare chenar punctat. Primește click-uri."""
 
     def __init__(
         self,
@@ -217,39 +219,55 @@ class RegionSelectOverlay:
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
 
-        sw = root.winfo_screenwidth()
-        sh = root.winfo_screenheight()
-        self.top.geometry(f"{sw}x{sh}+0+0")
+        try:
+            sw = root.winfo_vrootwidth()
+            sh = root.winfo_vrootheight()
+            vx = root.winfo_vrootx()
+            vy = root.winfo_vrooty()
+        except tk.TclError:
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            vx = vy = 0
+        self.top.geometry(f"{sw}x{sh}+{vx}+{vy}")
 
-        bg = TRANSPARENT_KEY
-        if sys.platform.startswith("win"):
-            try:
-                self.top.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
-            except tk.TclError:
-                bg = TASKBAR_BG
-        else:
-            self.top.attributes("-alpha", 0.01)
-            bg = "gray"
+        # transparentcolor = click-through pe Windows; folosim alpha foarte mic
+        overlay_bg = "#000000"
+        self.top.configure(bg=overlay_bg)
+        self.top.attributes("-alpha", CAPTURE_OVERLAY_ALPHA)
 
-        self.top.configure(bg=bg)
         self.canvas = tk.Canvas(
             self.top,
-            bg=bg,
+            bg=overlay_bg,
             highlightthickness=0,
             cursor="crosshair",
         )
         self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas.create_text(
+            16,
+            16,
+            text="Trage zona întrebării  •  Esc = anulare",
+            anchor="nw",
+            fill=CAPTURE_HINT_COLOR,
+            font=(FONT_FAMILY, 10, "bold"),
+        )
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.top.bind("<Escape>", self._on_cancel)
         self.top.bind("<Button-3>", self._on_cancel)
+        self.top.bind("<KeyPress-Escape>", self._on_cancel)
+
+        self.top.update_idletasks()
+        self.top.deiconify()
+        self.top.lift()
         self.top.focus_force()
         try:
             self.top.grab_set()
         except tk.TclError:
             pass
+        print("[Capture] Selector activ — trage dreptunghi pe ecran.")
 
     def _canvas_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
         return x_root - self.top.winfo_rootx(), y_root - self.top.winfo_rooty()
@@ -266,8 +284,8 @@ class RegionSelectOverlay:
             cx,
             cy,
             outline=CAPTURE_BORDER_COLOR,
-            width=2,
-            dash=(6, 4),
+            width=3,
+            dash=(8, 4),
         )
 
     def _on_drag(self, event: tk.Event) -> None:
@@ -740,16 +758,24 @@ class QuizSolverApp:
                 f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_SET_API_KEY}' pentru API key."
             ) from exc
         try:
-            keyboard.add_hotkey(HOTKEY_CAPTURE, self._on_capture_hotkey_pressed, suppress=False)
+            keyboard.add_hotkey(
+                HOTKEY_CAPTURE,
+                self._on_capture_hotkey_pressed,
+                suppress=True,
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_CAPTURE}' pentru captură zonă."
             ) from exc
+        print(
+            f"[Hotkeys] Request={HOTKEY} | Captură={HOTKEY_CAPTURE} | API key={HOTKEY_SET_API_KEY}"
+        )
 
     def _on_hotkey_pressed(self) -> None:
         self.root.after(0, self._handle_hotkey)
 
     def _on_capture_hotkey_pressed(self) -> None:
+        print(f"[Capture] Hotkey {HOTKEY_CAPTURE}")
         self.root.after(0, self._handle_capture_hotkey)
 
     def _on_api_hotkey_pressed(self) -> None:
@@ -850,15 +876,15 @@ class QuizSolverApp:
         self._start_region_select(api_key)
 
     def _start_region_select(self, api_key: str) -> None:
-        """Deschide selector transparent (chenar punctat), apoi trimite zona la API."""
+        """Deschide selector (chenar punctat), apoi trimite zona la API."""
         self._region_select_active = True
-        self.root.withdraw()
 
         def on_capture(image_jpeg: bytes | None) -> None:
             self._region_select_active = False
             if not image_jpeg:
                 print("[Capture] Anulat sau zonă prea mică.")
                 return
+            print(f"[Capture] Zonă OK ({len(image_jpeg) // 1024} KB JPEG)")
             self._last_clipboard = ""
             self._busy = True
             self._show_message("…+📷", show_copy=False)
@@ -869,7 +895,12 @@ class QuizSolverApp:
             )
             thread.start()
 
-        RegionSelectOverlay(self.root, on_capture)
+        try:
+            RegionSelectOverlay(self.root, on_capture)
+        except Exception as exc:
+            self._region_select_active = False
+            print(f"[Capture] Nu s-a putut deschide selectorul: {exc}")
+            self._show_message("Captură eșuată", show_copy=False)
 
     def _query_nvidia(
         self,
