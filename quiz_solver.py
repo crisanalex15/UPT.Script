@@ -13,7 +13,7 @@ Utilizare:
     1. Rulează: python quiz_solver.py
        sau:    python quiz_solver.py "<NVIDIA_API_KEY>"
     2. Selectează întrebarea (grilă SAU răspuns deschis), copiază (Ctrl+C)
-    3. Ctrl+Shift+S = request din clipboard | Ctrl+Alt+D = captură zonă (chenar punctat)
+    3. Ctrl+Alt+D = captură zonă + OCR | Ctrl+Alt+C = captură zonă + imagine
     4. Pe taskbar apare un indiciu scurt; click Copy pentru textul complet de lipit
     5. Click dreapta pe widget → Exit
 
@@ -58,7 +58,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "nvidia_model_fast": "meta/llama-3.3-70b-instruct",
     "nvidia_model_vlm": "mistralai/mistral-large-3-675b-instruct-2512",
     "hotkey_request": "ctrl+shift+s",
-    "hotkey_capture": "ctrl+alt+d",
+    "hotkey_capture_ocr": "ctrl+alt+d",
+    "hotkey_capture_image": "ctrl+alt+c",
     "hotkey_set_api_key": "ctrl+shift+a",
     "api_min_interval_sec": 2.0,
     "api_max_retries": 2,
@@ -69,7 +70,6 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "api_max_output_code": 4096,
     "image_max_dimension_px": 400,
     "image_jpeg_quality": 65,
-    "capture_mode": "ask",
     "ocr_fallback_vlm": True,
     "ocr_min_chars": 6,
 }
@@ -133,10 +133,10 @@ API_MAX_OUTPUT_LONG: int = max(300, _setting_int("api_max_output_long"))
 IMAGE_MAX_DIMENSION_PX: int = max(64, _setting_int("image_max_dimension_px"))
 IMAGE_JPEG_QUALITY: int = max(30, min(95, _setting_int("image_jpeg_quality")))
 HOTKEY: str = _setting_str("hotkey_request").lower() or "ctrl+shift+s"
-HOTKEY_CAPTURE: str = _setting_str("hotkey_capture").lower() or "ctrl+alt+d"
+HOTKEY_CAPTURE_OCR: str = _setting_str("hotkey_capture_ocr").lower() or "ctrl+alt+d"
+HOTKEY_CAPTURE_IMAGE: str = _setting_str("hotkey_capture_image").lower() or "ctrl+alt+c"
 HOTKEY_SET_API_KEY: str = _setting_str("hotkey_set_api_key").lower() or "ctrl+shift+a"
 API_MIN_INTERVAL_SEC: float = max(2.0, _setting_float("api_min_interval_sec"))
-CAPTURE_MODE: str = _setting_str("capture_mode").lower() or "ask"
 OCR_FALLBACK_VLM: bool = _setting_bool("ocr_fallback_vlm")
 OCR_MIN_CHARS: int = max(1, _setting_int("ocr_min_chars"))
 
@@ -147,7 +147,6 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "...",
         "…+📷",
         "OCR…",
-        "Text | Imagine",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -356,101 +355,6 @@ class RegionSelectOverlay:
             self.top.destroy()
         except tk.TclError:
             pass
-
-
-class CaptureModeChooser:
-    """După captură: alegi Text (OCR) sau Imagine (VLM)."""
-
-    def __init__(
-        self,
-        root: tk.Tk,
-        on_choice: Callable[[str], None],
-    ) -> None:
-        self.root = root
-        self.on_choice = on_choice
-        self._chosen = False
-
-        self.top = tk.Toplevel(root)
-        self.top.overrideredirect(True)
-        self.top.attributes("-topmost", True)
-
-        chrome = TASKBAR_BG
-        if sys.platform.startswith("win"):
-            try:
-                self.top.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
-                chrome = TRANSPARENT_KEY
-            except tk.TclError:
-                pass
-        self.top.configure(bg=chrome)
-
-        frame = tk.Frame(self.top, bg=chrome, padx=8, pady=4)
-        frame.pack()
-
-        label_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE)
-        link_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE, underline=True)
-
-        hint = tk.Label(
-            frame,
-            text="Trimite:",
-            bg=chrome,
-            fg=TEXT_COLOR,
-            font=label_font,
-        )
-        hint.pack(side=tk.LEFT, padx=(0, 6))
-
-        text_lbl = tk.Label(
-            frame,
-            text="Text OCR",
-            bg=chrome,
-            fg="#7EC8FF",
-            font=link_font,
-            cursor="hand2",
-        )
-        text_lbl.pack(side=tk.LEFT, padx=4)
-        text_lbl.bind("<Button-1>", lambda _e: self._pick("text"))
-
-        sep = tk.Label(frame, text="|", bg=chrome, fg=BUTTON_FG, font=label_font)
-        sep.pack(side=tk.LEFT)
-
-        img_lbl = tk.Label(
-            frame,
-            text="Imagine",
-            bg=chrome,
-            fg="#7EC8FF",
-            font=link_font,
-            cursor="hand2",
-        )
-        img_lbl.pack(side=tk.LEFT, padx=4)
-        img_lbl.bind("<Button-1>", lambda _e: self._pick("image"))
-
-        self.top.bind("<Escape>", lambda _e: self._pick("cancel"))
-        self.top.bind("<KeyPress-t>", lambda _e: self._pick("text"))
-        self.top.bind("<KeyPress-i>", lambda _e: self._pick("image"))
-        self.top.bind("<KeyPress-T>", lambda _e: self._pick("text"))
-        self.top.bind("<KeyPress-I>", lambda _e: self._pick("image"))
-
-        self.top.update_idletasks()
-        width = frame.winfo_reqwidth() + 4
-        height = frame.winfo_reqheight() + 4
-        screen_w = root.winfo_screenwidth()
-        screen_h = root.winfo_screenheight()
-        x = max(0, (screen_w - width) // 2)
-        y = max(0, screen_h - TASKBAR_HEIGHT_PX - height - 12)
-        self.top.geometry(f"{width}x{height}+{x}+{y}")
-        self.top.deiconify()
-        self.top.lift()
-        self.top.focus_force()
-        print("[Capture] Alege: Text OCR (T) sau Imagine (I) — Esc anulează.")
-
-    def _pick(self, mode: str) -> None:
-        if self._chosen:
-            return
-        self._chosen = True
-        try:
-            self.top.destroy()
-        except tk.TclError:
-            pass
-        self.on_choice(mode)
 
 
 def _api_key_looks_valid(key: str) -> bool:
@@ -911,24 +815,39 @@ class QuizSolverApp:
             ) from exc
         try:
             keyboard.add_hotkey(
-                HOTKEY_CAPTURE,
-                self._on_capture_hotkey_pressed,
+                HOTKEY_CAPTURE_OCR,
+                self._on_capture_ocr_hotkey_pressed,
                 suppress=True,
             )
         except Exception as exc:
             raise RuntimeError(
-                f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_CAPTURE}' pentru captură zonă."
+                f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_CAPTURE_OCR}' pentru captură OCR."
+            ) from exc
+        try:
+            keyboard.add_hotkey(
+                HOTKEY_CAPTURE_IMAGE,
+                self._on_capture_image_hotkey_pressed,
+                suppress=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Nu s-a putut înregistra hotkey-ul '{HOTKEY_CAPTURE_IMAGE}' pentru captură imagine."
             ) from exc
         print(
-            f"[Hotkeys] Request={HOTKEY} | Captură={HOTKEY_CAPTURE} | API key={HOTKEY_SET_API_KEY}"
+            f"[Hotkeys] Request={HOTKEY} | OCR={HOTKEY_CAPTURE_OCR} | "
+            f"Imagine={HOTKEY_CAPTURE_IMAGE} | API key={HOTKEY_SET_API_KEY}"
         )
 
     def _on_hotkey_pressed(self) -> None:
         self.root.after(0, self._handle_hotkey)
 
-    def _on_capture_hotkey_pressed(self) -> None:
-        print(f"[Capture] Hotkey {HOTKEY_CAPTURE}")
-        self.root.after(0, self._handle_capture_hotkey)
+    def _on_capture_ocr_hotkey_pressed(self) -> None:
+        print(f"[Capture] Hotkey OCR {HOTKEY_CAPTURE_OCR}")
+        self.root.after(0, self._handle_capture_ocr_hotkey)
+
+    def _on_capture_image_hotkey_pressed(self) -> None:
+        print(f"[Capture] Hotkey imagine {HOTKEY_CAPTURE_IMAGE}")
+        self.root.after(0, self._handle_capture_image_hotkey)
 
     def _on_api_hotkey_pressed(self) -> None:
         self.root.after(0, self._prompt_api_key_if_needed)
@@ -1006,29 +925,38 @@ class QuizSolverApp:
         )
         thread.start()
 
-    def _handle_capture_hotkey(self) -> None:
+    def _capture_api_key_or_bail(self) -> str | None:
         if self._busy or self._region_select_active:
-            return
-
+            return None
         api_key = self._effective_api_key()
         if not api_key:
             self._show_message(f"Setează cheia ({HOTKEY_SET_API_KEY.upper()})", show_copy=False)
-            return
+            return None
         if not _api_key_looks_valid(api_key):
             self._show_message("Cheie API invalidă", show_copy=False)
-            return
-
+            return None
         if self._last_api_call > 0:
             elapsed = time.monotonic() - self._last_api_call
             if elapsed < API_MIN_INTERVAL_SEC:
                 wait_sec = max(1, math.ceil(API_MIN_INTERVAL_SEC - elapsed))
                 self._show_message(f"Așteaptă {wait_sec}s", show_copy=False)
-                return
+                return None
+        return api_key
 
-        self._start_region_select(api_key)
+    def _handle_capture_ocr_hotkey(self) -> None:
+        api_key = self._capture_api_key_or_bail()
+        if not api_key:
+            return
+        self._start_region_select(api_key, "text")
 
-    def _start_region_select(self, api_key: str) -> None:
-        """Deschide selector (chenar punctat), apoi trimite zona la API."""
+    def _handle_capture_image_hotkey(self) -> None:
+        api_key = self._capture_api_key_or_bail()
+        if not api_key:
+            return
+        self._start_region_select(api_key, "image")
+
+    def _start_region_select(self, api_key: str, pipeline: str) -> None:
+        """Deschide selector (chenar punctat), apoi OCR sau imagine după hotkey."""
         self._region_select_active = True
 
         def on_capture(image_jpeg: bytes | None) -> None:
@@ -1039,7 +967,9 @@ class QuizSolverApp:
             print(f"[Capture] Zonă OK ({len(image_jpeg) // 1024} KB JPEG)")
             self.root.after(
                 0,
-                lambda img=image_jpeg, key=api_key: self._after_capture(img, key),
+                lambda img=image_jpeg, key=api_key, mode=pipeline: self._start_capture_pipeline(
+                    img, key, mode
+                ),
             )
 
         try:
@@ -1048,25 +978,6 @@ class QuizSolverApp:
             self._region_select_active = False
             print(f"[Capture] Nu s-a putut deschide selectorul: {exc}")
             self._show_message("Captură eșuată", show_copy=False)
-
-    def _after_capture(self, image_jpeg: bytes, api_key: str) -> None:
-        mode = CAPTURE_MODE
-        if mode == "ocr":
-            self._start_capture_pipeline(image_jpeg, api_key, "text")
-            return
-        if mode == "image":
-            self._start_capture_pipeline(image_jpeg, api_key, "image")
-            return
-        self._show_capture_mode_choice(image_jpeg, api_key)
-
-    def _show_capture_mode_choice(self, image_jpeg: bytes, api_key: str) -> None:
-        def on_choice(choice: str) -> None:
-            if choice == "cancel":
-                print("[Capture] Anulat.")
-                return
-            self._start_capture_pipeline(image_jpeg, api_key, choice)
-
-        CaptureModeChooser(self.root, on_choice)
 
     def _start_capture_pipeline(
         self,
@@ -1594,7 +1505,8 @@ def main() -> None:
         print("Cheie API NVIDIA (nvapi-) — OK.")
         print(
             f"Quiz Solver activ. Clipboard → {HOTKEY.upper()}. "
-            f"Captură zonă → {HOTKEY_CAPTURE.upper()}. "
+            f"Captură OCR → {HOTKEY_CAPTURE_OCR.upper()}. "
+            f"Captură imagine → {HOTKEY_CAPTURE_IMAGE.upper()}. "
             f"Setează cheie sesiune: {HOTKEY_SET_API_KEY.upper()}. "
             f"Pauză min. {API_MIN_INTERVAL_SEC:.0f}s. "
             f"Text rapid: {NVIDIA_MODEL_FAST} | Imagine: {NVIDIA_MODEL_VLM}. "
