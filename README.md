@@ -5,14 +5,23 @@
 | Combinație | Acțiune |
 |------------|---------|
 | `Ctrl+Shift+S` | Request din clipboard |
-| `Ctrl+Alt+D` | Captură zonă → **OCR local** (rapid) → AI |
+| `Ctrl+Alt+D` | Captură zonă → alegi **Text OCR** sau **Imagine** |
 | `Ctrl+Shift+A` | Setare cheie API |
 
-**Captură:** tragi dreptunghi → OCR extrage textul → model FAST. Dacă OCR eșuează, fallback automat la model VLM (imagine).
+## Captură (Ctrl+Alt+D)
 
-Setări OCR în `application_settings.json`:
-- `capture_use_ocr` — activează OCR la captură
-- `ocr_fallback_vlm` — trimite imaginea dacă OCR nu găsește text
-- `ocr_min_chars` — minimum caractere pentru a folosi OCR
+1. Tragi dreptunghi pe ecran
+2. Apare **Text OCR | Imagine**
+   - **Text OCR** (sau tasta `T`) → OCR local → model FAST (rapid)
+   - **Imagine** (sau tasta `I`) → trimite poza → model VLM
+   - **Esc** = anulare
 
-Prima rulare OCR descarcă modelul local (~10 MB). Instalează deps: `pip install -r requirements.txt`
+## Setări (`application_settings.json`)
+
+| Cheie | Valori | Descriere |
+|-------|--------|-----------|
+| `capture_mode` | `ask` / `ocr` / `image` | `ask` = alegi după captură |
+| `ocr_fallback_vlm` | true/false | Dacă OCR e gol, trimite imaginea |
+| `ocr_min_chars` | număr | Minim caractere pentru OCR valid |
+
+Deps OCR: `pip install -r requirements.txt`

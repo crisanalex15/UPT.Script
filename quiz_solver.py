@@ -69,7 +69,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "api_max_output_code": 4096,
     "image_max_dimension_px": 400,
     "image_jpeg_quality": 65,
-    "capture_use_ocr": True,
+    "capture_mode": "ask",
     "ocr_fallback_vlm": True,
     "ocr_min_chars": 6,
 }
@@ -136,7 +136,7 @@ HOTKEY: str = _setting_str("hotkey_request").lower() or "ctrl+shift+s"
 HOTKEY_CAPTURE: str = _setting_str("hotkey_capture").lower() or "ctrl+alt+d"
 HOTKEY_SET_API_KEY: str = _setting_str("hotkey_set_api_key").lower() or "ctrl+shift+a"
 API_MIN_INTERVAL_SEC: float = max(2.0, _setting_float("api_min_interval_sec"))
-CAPTURE_USE_OCR: bool = _setting_bool("capture_use_ocr")
+CAPTURE_MODE: str = _setting_str("capture_mode").lower() or "ask"
 OCR_FALLBACK_VLM: bool = _setting_bool("ocr_fallback_vlm")
 OCR_MIN_CHARS: int = max(1, _setting_int("ocr_min_chars"))
 
@@ -147,6 +147,7 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "...",
         "…+📷",
         "OCR…",
+        "Text | Imagine",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -355,6 +356,101 @@ class RegionSelectOverlay:
             self.top.destroy()
         except tk.TclError:
             pass
+
+
+class CaptureModeChooser:
+    """După captură: alegi Text (OCR) sau Imagine (VLM)."""
+
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_choice: Callable[[str], None],
+    ) -> None:
+        self.root = root
+        self.on_choice = on_choice
+        self._chosen = False
+
+        self.top = tk.Toplevel(root)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+
+        chrome = TASKBAR_BG
+        if sys.platform.startswith("win"):
+            try:
+                self.top.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
+                chrome = TRANSPARENT_KEY
+            except tk.TclError:
+                pass
+        self.top.configure(bg=chrome)
+
+        frame = tk.Frame(self.top, bg=chrome, padx=8, pady=4)
+        frame.pack()
+
+        label_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE)
+        link_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE, underline=True)
+
+        hint = tk.Label(
+            frame,
+            text="Trimite:",
+            bg=chrome,
+            fg=TEXT_COLOR,
+            font=label_font,
+        )
+        hint.pack(side=tk.LEFT, padx=(0, 6))
+
+        text_lbl = tk.Label(
+            frame,
+            text="Text OCR",
+            bg=chrome,
+            fg="#7EC8FF",
+            font=link_font,
+            cursor="hand2",
+        )
+        text_lbl.pack(side=tk.LEFT, padx=4)
+        text_lbl.bind("<Button-1>", lambda _e: self._pick("text"))
+
+        sep = tk.Label(frame, text="|", bg=chrome, fg=BUTTON_FG, font=label_font)
+        sep.pack(side=tk.LEFT)
+
+        img_lbl = tk.Label(
+            frame,
+            text="Imagine",
+            bg=chrome,
+            fg="#7EC8FF",
+            font=link_font,
+            cursor="hand2",
+        )
+        img_lbl.pack(side=tk.LEFT, padx=4)
+        img_lbl.bind("<Button-1>", lambda _e: self._pick("image"))
+
+        self.top.bind("<Escape>", lambda _e: self._pick("cancel"))
+        self.top.bind("<KeyPress-t>", lambda _e: self._pick("text"))
+        self.top.bind("<KeyPress-i>", lambda _e: self._pick("image"))
+        self.top.bind("<KeyPress-T>", lambda _e: self._pick("text"))
+        self.top.bind("<KeyPress-I>", lambda _e: self._pick("image"))
+
+        self.top.update_idletasks()
+        width = frame.winfo_reqwidth() + 4
+        height = frame.winfo_reqheight() + 4
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, screen_h - TASKBAR_HEIGHT_PX - height - 12)
+        self.top.geometry(f"{width}x{height}+{x}+{y}")
+        self.top.deiconify()
+        self.top.lift()
+        self.top.focus_force()
+        print("[Capture] Alege: Text OCR (T) sau Imagine (I) — Esc anulează.")
+
+    def _pick(self, mode: str) -> None:
+        if self._chosen:
+            return
+        self._chosen = True
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
+        self.on_choice(mode)
 
 
 def _api_key_looks_valid(key: str) -> bool:
@@ -941,15 +1037,10 @@ class QuizSolverApp:
                 print("[Capture] Anulat sau zonă prea mică.")
                 return
             print(f"[Capture] Zonă OK ({len(image_jpeg) // 1024} KB JPEG)")
-            self._last_clipboard = ""
-            self._busy = True
-            self._show_message("OCR…" if CAPTURE_USE_OCR else "…+📷", show_copy=False)
-            thread = threading.Thread(
-                target=self._process_capture,
-                args=(image_jpeg, api_key),
-                daemon=True,
+            self.root.after(
+                0,
+                lambda img=image_jpeg, key=api_key: self._after_capture(img, key),
             )
-            thread.start()
 
         try:
             RegionSelectOverlay(self.root, on_capture)
@@ -958,31 +1049,73 @@ class QuizSolverApp:
             print(f"[Capture] Nu s-a putut deschide selectorul: {exc}")
             self._show_message("Captură eșuată", show_copy=False)
 
-    def _process_capture(self, image_jpeg: bytes, api_key: str) -> None:
-        question_text = ""
-        image_for_api: bytes | None = image_jpeg
+    def _after_capture(self, image_jpeg: bytes, api_key: str) -> None:
+        mode = CAPTURE_MODE
+        if mode == "ocr":
+            self._start_capture_pipeline(image_jpeg, api_key, "text")
+            return
+        if mode == "image":
+            self._start_capture_pipeline(image_jpeg, api_key, "image")
+            return
+        self._show_capture_mode_choice(image_jpeg, api_key)
 
-        if CAPTURE_USE_OCR:
-            t0 = time.monotonic()
-            ocr_text = _ocr_from_jpeg(image_jpeg)
-            elapsed = time.monotonic() - t0
-            if len(ocr_text.strip()) >= OCR_MIN_CHARS:
-                question_text = ocr_text
-                image_for_api = None
-                preview = ocr_text.replace("\n", " ")[:80]
-                print(
-                    f"[OCR] {elapsed:.2f}s | {len(ocr_text)} chars → {NVIDIA_MODEL_FAST}\n"
-                    f"      {preview}{'…' if len(ocr_text) > 80 else ''}"
-                )
-                self.root.after(0, lambda: self._show_message("...", show_copy=False))
-            elif OCR_FALLBACK_VLM:
-                print(f"[OCR] {elapsed:.2f}s | text insuficient → {NVIDIA_MODEL_VLM}")
-                self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
-            else:
-                self.root.after(0, lambda: self._finish_query("OCR gol", ""))
+    def _show_capture_mode_choice(self, image_jpeg: bytes, api_key: str) -> None:
+        def on_choice(choice: str) -> None:
+            if choice == "cancel":
+                print("[Capture] Anulat.")
                 return
+            self._start_capture_pipeline(image_jpeg, api_key, choice)
 
-        self._query_nvidia(question_text, image_for_api, api_key)
+        CaptureModeChooser(self.root, on_choice)
+
+    def _start_capture_pipeline(
+        self,
+        image_jpeg: bytes,
+        api_key: str,
+        mode: str,
+    ) -> None:
+        self._last_clipboard = ""
+        self._busy = True
+        if mode == "text":
+            self._show_message("OCR…", show_copy=False)
+            thread = threading.Thread(
+                target=self._process_capture_text,
+                args=(image_jpeg, api_key),
+                daemon=True,
+            )
+        else:
+            print(f"[Capture] Trimite imagine → {NVIDIA_MODEL_VLM}")
+            self._show_message("…+📷", show_copy=False)
+            thread = threading.Thread(
+                target=self._query_nvidia,
+                args=("", image_jpeg, api_key),
+                daemon=True,
+            )
+        thread.start()
+
+    def _process_capture_text(self, image_jpeg: bytes, api_key: str) -> None:
+        t0 = time.monotonic()
+        ocr_text = _ocr_from_jpeg(image_jpeg)
+        elapsed = time.monotonic() - t0
+
+        if len(ocr_text.strip()) >= OCR_MIN_CHARS:
+            preview = ocr_text.replace("\n", " ")[:80]
+            print(
+                f"[OCR] {elapsed:.2f}s | {len(ocr_text)} chars → {NVIDIA_MODEL_FAST}\n"
+                f"      {preview}{'…' if len(ocr_text) > 80 else ''}"
+            )
+            self.root.after(0, lambda: self._show_message("...", show_copy=False))
+            self._query_nvidia(ocr_text, None, api_key)
+            return
+
+        print(f"[OCR] {elapsed:.2f}s | text insuficient ({len(ocr_text.strip())} chars)")
+        if OCR_FALLBACK_VLM:
+            print(f"[OCR] Fallback → {NVIDIA_MODEL_VLM}")
+            self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
+            self._query_nvidia("", image_jpeg, api_key)
+            return
+
+        self.root.after(0, lambda: self._finish_query("OCR gol", ""))
 
     def _query_nvidia(
         self,
