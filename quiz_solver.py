@@ -147,6 +147,7 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "...",
         "…+📷",
         "OCR…",
+        "Ocupat…",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -212,6 +213,8 @@ CAPTURE_BORDER_COLOR = "#00A8FF"
 CAPTURE_HINT_COLOR = "#FFFFFF"
 CAPTURE_MIN_SIZE_PX = 10
 CAPTURE_OVERLAY_ALPHA = 0.08
+CAPTURE_REGION_TIMEOUT_MS = 90_000
+HOTKEY_DEBOUNCE_SEC = 0.35
 
 
 class RegionSelectOverlay:
@@ -321,12 +324,12 @@ class RegionSelectOverlay:
         x2 = max(self._start_x, event.x_root)
         y2 = max(self._start_y, event.y_root)
         if x2 - x1 < CAPTURE_MIN_SIZE_PX or y2 - y1 < CAPTURE_MIN_SIZE_PX:
-            self._close()
+            self._destroy_overlay()
             self.on_complete(None)
             return
         bbox = (x1, y1, x2, y2)
-        self._close()
-        self.root.after(80, lambda: self._grab_bbox(bbox))
+        self._destroy_overlay()
+        self.root.after(80, lambda b=bbox: self._grab_bbox(b))
 
     def _grab_bbox(self, bbox: tuple[int, int, int, int]) -> None:
         try:
@@ -340,10 +343,14 @@ class RegionSelectOverlay:
             self.on_complete(None)
 
     def _on_cancel(self, _event: tk.Event | None = None) -> None:
-        self._close()
+        self._destroy_overlay()
         self.on_complete(None)
 
-    def _close(self) -> None:
+    def force_close(self) -> None:
+        """Închide selectorul fără callback (reset hotkey)."""
+        self._destroy_overlay()
+
+    def _destroy_overlay(self) -> None:
         if self._closed:
             return
         self._closed = True
@@ -355,6 +362,9 @@ class RegionSelectOverlay:
             self.top.destroy()
         except tk.TclError:
             pass
+
+    def _close(self) -> None:
+        self._destroy_overlay()
 
 
 def _api_key_looks_valid(key: str) -> bool:
@@ -663,6 +673,11 @@ class QuizSolverApp:
         self._session_api_key: str = initial_api_key.strip()
         self._api_prompt_open = False
         self._region_select_active = False
+        self._active_region_overlay: RegionSelectOverlay | None = None
+        self._region_watchdog_job: str | None = None
+        self._last_capture_ocr_at = 0.0
+        self._last_capture_image_at = 0.0
+        self._hotkey_lock = threading.Lock()
 
         self._setup_ui()
         self._setup_context_menu()
@@ -817,7 +832,8 @@ class QuizSolverApp:
             keyboard.add_hotkey(
                 HOTKEY_CAPTURE_OCR,
                 self._on_capture_ocr_hotkey_pressed,
-                suppress=True,
+                suppress=False,
+                trigger_on_release=True,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -827,7 +843,8 @@ class QuizSolverApp:
             keyboard.add_hotkey(
                 HOTKEY_CAPTURE_IMAGE,
                 self._on_capture_image_hotkey_pressed,
-                suppress=True,
+                suppress=False,
+                trigger_on_release=True,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -838,19 +855,35 @@ class QuizSolverApp:
             f"Imagine={HOTKEY_CAPTURE_IMAGE} | API key={HOTKEY_SET_API_KEY}"
         )
 
+    def _dispatch_to_main(self, callback: Callable[[], None]) -> None:
+        try:
+            self.root.after(0, callback)
+        except tk.TclError:
+            print("[Hotkeys] Tkinter indisponibil — callback ignorat.")
+
     def _on_hotkey_pressed(self) -> None:
-        self.root.after(0, self._handle_hotkey)
+        self._dispatch_to_main(self._handle_hotkey)
 
     def _on_capture_ocr_hotkey_pressed(self) -> None:
+        now = time.monotonic()
+        with self._hotkey_lock:
+            if now - self._last_capture_ocr_at < HOTKEY_DEBOUNCE_SEC:
+                return
+            self._last_capture_ocr_at = now
         print(f"[Capture] Hotkey OCR {HOTKEY_CAPTURE_OCR}")
-        self.root.after(0, self._handle_capture_ocr_hotkey)
+        self._dispatch_to_main(self._handle_capture_ocr_hotkey)
 
     def _on_capture_image_hotkey_pressed(self) -> None:
+        now = time.monotonic()
+        with self._hotkey_lock:
+            if now - self._last_capture_image_at < HOTKEY_DEBOUNCE_SEC:
+                return
+            self._last_capture_image_at = now
         print(f"[Capture] Hotkey imagine {HOTKEY_CAPTURE_IMAGE}")
-        self.root.after(0, self._handle_capture_image_hotkey)
+        self._dispatch_to_main(self._handle_capture_image_hotkey)
 
     def _on_api_hotkey_pressed(self) -> None:
-        self.root.after(0, self._prompt_api_key_if_needed)
+        self._dispatch_to_main(self._prompt_api_key_if_needed)
 
     def _effective_api_key(self) -> str:
         if self._session_api_key:
@@ -926,41 +959,92 @@ class QuizSolverApp:
         thread.start()
 
     def _capture_api_key_or_bail(self) -> str | None:
-        if self._busy or self._region_select_active:
-            return None
         api_key = self._effective_api_key()
         if not api_key:
             self._show_message(f"Setează cheia ({HOTKEY_SET_API_KEY.upper()})", show_copy=False)
+            print("[Capture] Blocat: lipsă cheie API.")
             return None
         if not _api_key_looks_valid(api_key):
             self._show_message("Cheie API invalidă", show_copy=False)
+            print("[Capture] Blocat: cheie API invalidă.")
             return None
         if self._last_api_call > 0:
             elapsed = time.monotonic() - self._last_api_call
             if elapsed < API_MIN_INTERVAL_SEC:
                 wait_sec = max(1, math.ceil(API_MIN_INTERVAL_SEC - elapsed))
                 self._show_message(f"Așteaptă {wait_sec}s", show_copy=False)
+                print(f"[Capture] Blocat: pauză API ({wait_sec}s).")
                 return None
         return api_key
 
-    def _handle_capture_ocr_hotkey(self) -> None:
+    def _force_close_region_overlay(self) -> None:
+        if self._region_watchdog_job:
+            try:
+                self.root.after_cancel(self._region_watchdog_job)
+            except Exception:
+                pass
+            self._region_watchdog_job = None
+        overlay = self._active_region_overlay
+        self._active_region_overlay = None
+        self._region_select_active = False
+        if overlay is not None:
+            try:
+                overlay.force_close()
+            except Exception as exc:
+                print(f"[Capture] Eroare la închidere selector: {exc}")
+
+    def _arm_region_watchdog(self) -> None:
+        if self._region_watchdog_job:
+            try:
+                self.root.after_cancel(self._region_watchdog_job)
+            except Exception:
+                pass
+
+        def on_timeout() -> None:
+            self._region_watchdog_job = None
+            if not self._region_select_active:
+                return
+            print("[Capture] Timeout selector — reset automat.")
+            self._force_close_region_overlay()
+
+        self._region_watchdog_job = self.root.after(CAPTURE_REGION_TIMEOUT_MS, on_timeout)
+
+    def _begin_capture_hotkey(self, pipeline: str) -> None:
+        if self._busy:
+            print("[Capture] Ignorat: request API în curs.")
+            self._show_message("Ocupat…", show_copy=False)
+            return
+
+        if self._region_select_active:
+            print("[Capture] Selector deja activ — reset.")
+            self._force_close_region_overlay()
+
         api_key = self._capture_api_key_or_bail()
         if not api_key:
             return
-        self._start_region_select(api_key, "text")
+        self._start_region_select(api_key, pipeline)
+
+    def _handle_capture_ocr_hotkey(self) -> None:
+        self._begin_capture_hotkey("text")
 
     def _handle_capture_image_hotkey(self) -> None:
-        api_key = self._capture_api_key_or_bail()
-        if not api_key:
-            return
-        self._start_region_select(api_key, "image")
+        self._begin_capture_hotkey("image")
 
     def _start_region_select(self, api_key: str, pipeline: str) -> None:
         """Deschide selector (chenar punctat), apoi OCR sau imagine după hotkey."""
+        self._force_close_region_overlay()
         self._region_select_active = True
+        self._arm_region_watchdog()
 
         def on_capture(image_jpeg: bytes | None) -> None:
             self._region_select_active = False
+            self._active_region_overlay = None
+            if self._region_watchdog_job:
+                try:
+                    self.root.after_cancel(self._region_watchdog_job)
+                except Exception:
+                    pass
+                self._region_watchdog_job = None
             if not image_jpeg:
                 print("[Capture] Anulat sau zonă prea mică.")
                 return
@@ -973,9 +1057,10 @@ class QuizSolverApp:
             )
 
         try:
-            RegionSelectOverlay(self.root, on_capture)
+            overlay = RegionSelectOverlay(self.root, on_capture)
+            self._active_region_overlay = overlay
         except Exception as exc:
-            self._region_select_active = False
+            self._force_close_region_overlay()
             print(f"[Capture] Nu s-a putut deschide selectorul: {exc}")
             self._show_message("Captură eșuată", show_copy=False)
 
@@ -1452,6 +1537,7 @@ class QuizSolverApp:
             return
         self._shutting_down = True
         self._busy = False
+        self._force_close_region_overlay()
         # Cheia introdusă prin hotkey rămâne doar în sesiunea curentă.
         self._session_api_key = ""
 
