@@ -69,6 +69,9 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "api_max_output_code": 4096,
     "image_max_dimension_px": 400,
     "image_jpeg_quality": 65,
+    "capture_use_ocr": True,
+    "ocr_fallback_vlm": True,
+    "ocr_min_chars": 6,
 }
 
 
@@ -109,6 +112,13 @@ def _setting_float(key: str) -> float:
         return float(DEFAULT_SETTINGS[key])
 
 
+def _setting_bool(key: str) -> bool:
+    value = _SETTINGS.get(key, DEFAULT_SETTINGS[key])
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "da", "on"}
+
+
 NVIDIA_API_KEY: str = _setting_str("nvidia_api_key")
 NVIDIA_BASE_URL: str = _setting_str("nvidia_base_url") or str(DEFAULT_SETTINGS["nvidia_base_url"])
 NVIDIA_MODEL_VLM: str = _setting_str("nvidia_model_vlm") or str(DEFAULT_SETTINGS["nvidia_model_vlm"])
@@ -126,6 +136,9 @@ HOTKEY: str = _setting_str("hotkey_request").lower() or "ctrl+shift+s"
 HOTKEY_CAPTURE: str = _setting_str("hotkey_capture").lower() or "ctrl+alt+d"
 HOTKEY_SET_API_KEY: str = _setting_str("hotkey_set_api_key").lower() or "ctrl+shift+a"
 API_MIN_INTERVAL_SEC: float = max(2.0, _setting_float("api_min_interval_sec"))
+CAPTURE_USE_OCR: bool = _setting_bool("capture_use_ocr")
+OCR_FALLBACK_VLM: bool = _setting_bool("ocr_fallback_vlm")
+OCR_MIN_CHARS: int = max(1, _setting_int("ocr_min_chars"))
 
 # Mesaje fără buton Copy (doar feedback pe taskbar)
 NO_COPY_DISPLAYS: frozenset[str] = frozenset(
@@ -133,6 +146,7 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "?",
         "...",
         "…+📷",
+        "OCR…",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -445,6 +459,48 @@ def _compress_clipboard_image(img: object) -> bytes | None:
     buffer = io.BytesIO()
     gray.save(buffer, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
     return buffer.getvalue()
+
+
+_ocr_engine: object | None = None
+
+
+def _get_ocr_engine() -> object:
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        print("[OCR] Încarc modelul local…")
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+def _ocr_from_jpeg(jpeg_bytes: bytes) -> str:
+    """Extrage text din captură (local, rapid)."""
+    try:
+        import numpy as np
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        width, height = img.size
+        longest = max(width, height)
+        if longest < 160:
+            scale = 160 / longest
+            img = img.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+
+        result, _ = _get_ocr_engine()(np.asarray(img))
+        if not result:
+            return ""
+        lines = [str(line[1]).strip() for line in result if len(line) > 1 and line[1]]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    except ImportError:
+        print("[OCR] rapidocr-onnxruntime lipsește — pip install rapidocr-onnxruntime")
+        return ""
+    except Exception as exc:
+        print(f"[OCR] Eroare: {exc}")
+        return ""
 
 
 def _create_nvidia_client(api_key: str) -> OpenAI:
@@ -887,10 +943,10 @@ class QuizSolverApp:
             print(f"[Capture] Zonă OK ({len(image_jpeg) // 1024} KB JPEG)")
             self._last_clipboard = ""
             self._busy = True
-            self._show_message("…+📷", show_copy=False)
+            self._show_message("OCR…" if CAPTURE_USE_OCR else "…+📷", show_copy=False)
             thread = threading.Thread(
-                target=self._query_nvidia,
-                args=("", image_jpeg, api_key),
+                target=self._process_capture,
+                args=(image_jpeg, api_key),
                 daemon=True,
             )
             thread.start()
@@ -901,6 +957,32 @@ class QuizSolverApp:
             self._region_select_active = False
             print(f"[Capture] Nu s-a putut deschide selectorul: {exc}")
             self._show_message("Captură eșuată", show_copy=False)
+
+    def _process_capture(self, image_jpeg: bytes, api_key: str) -> None:
+        question_text = ""
+        image_for_api: bytes | None = image_jpeg
+
+        if CAPTURE_USE_OCR:
+            t0 = time.monotonic()
+            ocr_text = _ocr_from_jpeg(image_jpeg)
+            elapsed = time.monotonic() - t0
+            if len(ocr_text.strip()) >= OCR_MIN_CHARS:
+                question_text = ocr_text
+                image_for_api = None
+                preview = ocr_text.replace("\n", " ")[:80]
+                print(
+                    f"[OCR] {elapsed:.2f}s | {len(ocr_text)} chars → {NVIDIA_MODEL_FAST}\n"
+                    f"      {preview}{'…' if len(ocr_text) > 80 else ''}"
+                )
+                self.root.after(0, lambda: self._show_message("...", show_copy=False))
+            elif OCR_FALLBACK_VLM:
+                print(f"[OCR] {elapsed:.2f}s | text insuficient → {NVIDIA_MODEL_VLM}")
+                self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
+            else:
+                self.root.after(0, lambda: self._finish_query("OCR gol", ""))
+                return
+
+        self._query_nvidia(question_text, image_for_api, api_key)
 
     def _query_nvidia(
         self,
