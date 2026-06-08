@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import base64
+import ctypes
 import io
 import json
 import math
@@ -149,6 +150,7 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "OCR…",
         "Captură OCR…",
         "Captură img…",
+        "Captură mică",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -212,7 +214,8 @@ TASKBAR_HEIGHT_PX = 48
 # Selector zonă ecran — chenar punctat; alpha mic (NU transparentcolor: click-urile trec prin)
 CAPTURE_BORDER_COLOR = "#00A8FF"
 CAPTURE_HINT_COLOR = "#FFFFFF"
-CAPTURE_MIN_SIZE_PX = 10
+CAPTURE_MIN_SIZE_PX = 40
+CAPTURE_MIN_JPEG_BYTES = 800
 CAPTURE_OVERLAY_ALPHA = 0.08
 CAPTURE_REGION_TIMEOUT_MS = 90_000
 HOTKEY_DEBOUNCE_SEC = 0.35
@@ -347,14 +350,29 @@ class RegionSelectOverlay:
             return
         bbox = (x1, y1, x2, y2)
         self._destroy_overlay()
-        self.root.after(80, lambda b=bbox: self._grab_bbox(b))
+        self.root.update_idletasks()
+        self._grab_bbox(bbox)
 
     def _grab_bbox(self, bbox: tuple[int, int, int, int]) -> None:
         try:
             from PIL import ImageGrab
 
-            img = ImageGrab.grab(bbox=bbox)
-            jpeg = _compress_clipboard_image(img)
+            x1, y1, x2, y2 = bbox
+            w, h = x2 - x1, y2 - y1
+            print(f"[Capture] bbox {w}x{h}px @ ({x1},{y1})")
+            try:
+                img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            except TypeError:
+                img = ImageGrab.grab(bbox=bbox)
+            jpeg = _compress_capture_image(img)
+            if not jpeg or len(jpeg) < CAPTURE_MIN_JPEG_BYTES:
+                print(
+                    f"[Capture] Imagine invalidă ({len(jpeg or b'')} bytes) — "
+                    "trage o zonă mai mare."
+                )
+                self.on_complete(None)
+                return
+            print(f"[Capture] JPEG {len(jpeg) // 1024} KB ({img.size[0]}x{img.size[1]}px)")
             self.on_complete(jpeg)
         except Exception as exc:
             print(f"[Capture] Eroare: {exc}")
@@ -487,6 +505,53 @@ def _compress_clipboard_image(img: object) -> bytes | None:
     buffer = io.BytesIO()
     gray.save(buffer, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
     return buffer.getvalue()
+
+
+def _compress_capture_image(img: object) -> bytes | None:
+    """Captură ecran — păstrează RGB + calitate mai bună pentru OCR."""
+    from PIL import Image, ImageEnhance
+
+    if not isinstance(img, Image.Image):
+        return None
+
+    rgb = img.convert("RGB")
+    width, height = rgb.size
+    if width < 2 or height < 2:
+        return None
+
+    longest = max(width, height)
+    min_dim = 200
+    if longest < min_dim:
+        scale = min_dim / longest
+        rgb = rgb.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    elif longest > IMAGE_MAX_DIMENSION_PX:
+        scale = IMAGE_MAX_DIMENSION_PX / longest
+        rgb = rgb.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.25)
+    buffer = io.BytesIO()
+    quality = max(88, IMAGE_JPEG_QUALITY)
+    rgb.save(buffer, format="JPEG", quality=quality, optimize=True)
+    return buffer.getvalue()
+
+
+def _enable_windows_dpi_awareness() -> None:
+    """Aliniază coordonatele Tkinter cu ImageGrab pe ecrane HiDPI."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 _ocr_engine: object | None = None
@@ -1081,9 +1146,11 @@ class QuizSolverApp:
                     pass
                 self._region_watchdog_job = None
             if not image_jpeg:
-                print("[Capture] Anulat sau zonă prea mică.")
+                print("[Capture] Anulat, zonă prea mică sau imagine invalidă.")
+                self.root.after(0, lambda: self._show_message("Captură mică", show_copy=False))
                 return
-            print(f"[Capture] Zonă OK ({len(image_jpeg) // 1024} KB JPEG)")
+            kb = max(1, len(image_jpeg) // 1024) if image_jpeg else 0
+            print(f"[Capture] Zonă OK ({kb} KB JPEG, {len(image_jpeg)} bytes)")
             self.root.after(
                 0,
                 lambda img=image_jpeg, key=api_key, mode=pipeline: self._start_capture_pipeline(
@@ -1610,6 +1677,7 @@ class QuizSolverApp:
 
 
 def main() -> None:
+    _enable_windows_dpi_awareness()
     cli_api_key = ""
     if len(sys.argv) > 1:
         candidate = (sys.argv[1] or "").strip()
