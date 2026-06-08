@@ -147,7 +147,6 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "...",
         "…+📷",
         "OCR…",
-        "Ocupat…",
         "Captură OCR…",
         "Captură img…",
         "Nimic copiat",
@@ -675,6 +674,7 @@ class QuizSolverApp:
                 self._chrome_bg = TASKBAR_BG
 
         self._busy = False
+        self._busy_since: float = 0.0
         self._fade_job: str | None = None
         self._last_clipboard = ""
         self._last_display = ""
@@ -886,6 +886,18 @@ class QuizSolverApp:
     def _reset_capture_state(self) -> None:
         """Închide selectorul vechi dacă a rămas blocat."""
         self._force_close_region_overlay()
+        self._maybe_unstick_busy()
+
+    def _maybe_unstick_busy(self) -> None:
+        if self._busy and self._busy_since > 0:
+            if time.monotonic() - self._busy_since > 90:
+                print("[API] Request blocat >90s — reset _busy.")
+                self._busy = False
+                self._busy_since = 0.0
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._busy_since = time.monotonic() if busy else 0.0
 
     def _on_hotkey_pressed(self) -> None:
         self._dispatch_to_main(self._handle_hotkey)
@@ -949,6 +961,7 @@ class QuizSolverApp:
             self._api_prompt_open = False
 
     def _handle_hotkey(self) -> None:
+        self._maybe_unstick_busy()
         if self._busy or self._region_select_active:
             return
 
@@ -973,7 +986,6 @@ class QuizSolverApp:
                 return
 
         self._last_clipboard = clipboard_text
-        self._busy = True
         loading = "…+📷" if image_jpeg else "..."
         self._show_message(loading, show_copy=False)
 
@@ -1038,11 +1050,6 @@ class QuizSolverApp:
     def _begin_capture_hotkey(self, pipeline: str) -> None:
         self._reset_capture_state()
 
-        if self._busy:
-            print("[Capture] Ignorat: request API în curs.")
-            self._show_message("Ocupat…", show_copy=False)
-            return
-
         api_key = self._capture_api_key_or_bail()
         if not api_key:
             return
@@ -1099,9 +1106,8 @@ class QuizSolverApp:
         mode: str,
     ) -> None:
         self._last_clipboard = ""
-        self._busy = True
         if mode == "text":
-            self._show_message("OCR…", show_copy=False)
+            self.root.after(0, lambda: self._show_message("OCR…", show_copy=False))
             thread = threading.Thread(
                 target=self._process_capture_text,
                 args=(image_jpeg, api_key),
@@ -1109,7 +1115,7 @@ class QuizSolverApp:
             )
         else:
             print(f"[Capture] Trimite imagine → {NVIDIA_MODEL_VLM}")
-            self._show_message("…+📷", show_copy=False)
+            self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
             thread = threading.Thread(
                 target=self._query_nvidia,
                 args=("", image_jpeg, api_key),
@@ -1118,28 +1124,32 @@ class QuizSolverApp:
         thread.start()
 
     def _process_capture_text(self, image_jpeg: bytes, api_key: str) -> None:
-        t0 = time.monotonic()
-        ocr_text = _ocr_from_jpeg(image_jpeg)
-        elapsed = time.monotonic() - t0
+        try:
+            t0 = time.monotonic()
+            ocr_text = _ocr_from_jpeg(image_jpeg)
+            elapsed = time.monotonic() - t0
 
-        if len(ocr_text.strip()) >= OCR_MIN_CHARS:
-            preview = ocr_text.replace("\n", " ")[:80]
-            print(
-                f"[OCR] {elapsed:.2f}s | {len(ocr_text)} chars → {NVIDIA_MODEL_FAST}\n"
-                f"      {preview}{'…' if len(ocr_text) > 80 else ''}"
-            )
-            self.root.after(0, lambda: self._show_message("...", show_copy=False))
-            self._query_nvidia(ocr_text, None, api_key)
-            return
+            if len(ocr_text.strip()) >= OCR_MIN_CHARS:
+                preview = ocr_text.replace("\n", " ")[:80]
+                print(
+                    f"[OCR] {elapsed:.2f}s | {len(ocr_text)} chars → {NVIDIA_MODEL_FAST}\n"
+                    f"      {preview}{'…' if len(ocr_text) > 80 else ''}"
+                )
+                self.root.after(0, lambda: self._show_message("...", show_copy=False))
+                self._query_nvidia(ocr_text, None, api_key)
+                return
 
-        print(f"[OCR] {elapsed:.2f}s | text insuficient ({len(ocr_text.strip())} chars)")
-        if OCR_FALLBACK_VLM:
-            print(f"[OCR] Fallback → {NVIDIA_MODEL_VLM}")
-            self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
-            self._query_nvidia("", image_jpeg, api_key)
-            return
+            print(f"[OCR] {elapsed:.2f}s | text insuficient ({len(ocr_text.strip())} chars)")
+            if OCR_FALLBACK_VLM:
+                print(f"[OCR] Fallback → {NVIDIA_MODEL_VLM}")
+                self.root.after(0, lambda: self._show_message("…+📷", show_copy=False))
+                self._query_nvidia("", image_jpeg, api_key)
+                return
 
-        self.root.after(0, lambda: self._finish_query("OCR gol", ""))
+            self.root.after(0, lambda: self._finish_query("OCR gol", ""))
+        except Exception as exc:
+            print(f"[OCR] Eroare neașteptată: {exc}")
+            self.root.after(0, lambda: self._finish_query("OCR eroare", ""))
 
     def _query_nvidia(
         self,
@@ -1147,6 +1157,7 @@ class QuizSolverApp:
         image_jpeg: bytes | None = None,
         api_key: str = "",
     ) -> None:
+        self._set_busy(True)
         try:
             if not api_key:
                 self.root.after(0, lambda: self._finish_query("Fără cheie API", ""))
@@ -1199,7 +1210,7 @@ class QuizSolverApp:
             self.root.after(0, lambda d=display: self._finish_query(d, ""))
 
     def _finish_query(self, display: str, copy_text: str) -> None:
-        self._busy = False
+        self._set_busy(False)
         self._last_display = display
         self._last_copy_text = self._sanitize_copy_text(copy_text) if copy_text else ""
         has_copy = bool(copy_text) and display not in NO_COPY_DISPLAYS and not display.startswith(
