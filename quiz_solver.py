@@ -148,6 +148,8 @@ NO_COPY_DISPLAYS: frozenset[str] = frozenset(
         "…+📷",
         "OCR…",
         "Ocupat…",
+        "Captură OCR…",
+        "Captură img…",
         "Nimic copiat",
         "Fără cheie API",
         "Prea rapid",
@@ -279,9 +281,26 @@ class RegionSelectOverlay:
         self.top.update_idletasks()
         self.top.deiconify()
         self.top.lift()
+        self.top.attributes("-topmost", True)
         self.top.focus_force()
         try:
-            self.top.grab_set()
+            self.top.grab_set_global()
+        except tk.TclError:
+            try:
+                self.top.grab_set()
+            except tk.TclError:
+                pass
+        # Re-ridică după un tick — pe Windows cu parent withdraw overlay-ul poate rămâne invizibil
+        self.top.after(50, self._raise_overlay)
+
+    def _raise_overlay(self) -> None:
+        if self._closed:
+            return
+        try:
+            self.top.deiconify()
+            self.top.lift()
+            self.top.attributes("-topmost", True)
+            self.top.focus_force()
         except tk.TclError:
             pass
         print("[Capture] Selector activ — trage dreptunghi pe ecran.")
@@ -833,7 +852,7 @@ class QuizSolverApp:
                 HOTKEY_CAPTURE_OCR,
                 self._on_capture_ocr_hotkey_pressed,
                 suppress=False,
-                trigger_on_release=True,
+                trigger_on_release=False,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -844,7 +863,7 @@ class QuizSolverApp:
                 HOTKEY_CAPTURE_IMAGE,
                 self._on_capture_image_hotkey_pressed,
                 suppress=False,
-                trigger_on_release=True,
+                trigger_on_release=False,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -857,9 +876,16 @@ class QuizSolverApp:
 
     def _dispatch_to_main(self, callback: Callable[[], None]) -> None:
         try:
-            self.root.after(0, callback)
+            if threading.current_thread() is threading.main_thread():
+                callback()
+            else:
+                self.root.after_idle(callback)
         except tk.TclError:
             print("[Hotkeys] Tkinter indisponibil — callback ignorat.")
+
+    def _reset_capture_state(self) -> None:
+        """Închide selectorul vechi dacă a rămas blocat."""
+        self._force_close_region_overlay()
 
     def _on_hotkey_pressed(self) -> None:
         self._dispatch_to_main(self._handle_hotkey)
@@ -1010,18 +1036,20 @@ class QuizSolverApp:
         self._region_watchdog_job = self.root.after(CAPTURE_REGION_TIMEOUT_MS, on_timeout)
 
     def _begin_capture_hotkey(self, pipeline: str) -> None:
+        self._reset_capture_state()
+
         if self._busy:
             print("[Capture] Ignorat: request API în curs.")
             self._show_message("Ocupat…", show_copy=False)
             return
 
-        if self._region_select_active:
-            print("[Capture] Selector deja activ — reset.")
-            self._force_close_region_overlay()
-
         api_key = self._capture_api_key_or_bail()
         if not api_key:
             return
+
+        label = "Captură OCR…" if pipeline == "text" else "Captură img…"
+        self._show_message(label, show_copy=False)
+        self.root.update_idletasks()
         self._start_region_select(api_key, pipeline)
 
     def _handle_capture_ocr_hotkey(self) -> None:
